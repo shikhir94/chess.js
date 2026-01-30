@@ -169,3 +169,17 @@ test('Chess constructor - skipValidation = true', () => {
     )
   }).toThrowError()
 })
+
+test('Chess constructor - isChess960 = true', () => {
+  const chess = new Chess(undefined, { isChess960: true })
+  expect((chess as any)._isChess960).toBe(true)
+})
+
+test('generateChess960 - returns valid FEN', () => {
+  const fen = Chess.generateChess960()
+  expect(() => new Chess(fen)).not.toThrow()
+  // Check it's not standard
+  expect(fen).not.toBe('rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1')
+})
+
+

@@ -26,6 +26,27 @@ NPM:
 npm install chess.js
 ```
 
+## Chess960 Support
+
+chess.js supports Chess960 (Fischer Random Chess) for generating random starting positions and handling variant rules like flexible castling.
+
+### Generating a Chess960 Position
+```ts
+import { Chess } from 'chess.js'
+
+const fen = Chess.generateChess960()
+const chess = new Chess(fen, { isChess960: true })
+```
+
+### Playing Chess960
+```ts
+const chess = new Chess(Chess.generateChess960(), { isChess960: true })
+
+// Moves work the same, including castling
+chess.move('e4')
+chess.move('O-O')  // Castling to kingside rook
+```
+
 ## Example Code
 
 The code below plays a random game of chess:

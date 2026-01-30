@@ -755,17 +755,23 @@ export class Chess {
   private _suffixes: Record<string, Suffix> = {}
   private _nags: Record<string, NAG[]> = {}
   private _castling: Record<Color, number> = { w: 0, b: 0 }
+  private _isChess960 = false
+  private _rooks: Record<Color, { kingside: number; queenside: number }> = {
+    w: { kingside: Ox88.h1, queenside: Ox88.a1 },
+    b: { kingside: Ox88.h8, queenside: Ox88.a8 },
+  }
 
   private _hash = 0n
 
   // tracks number of times a position has been seen for repetition checking
   private _positionCount = new Map<bigint, number>()
 
-  constructor(fen = DEFAULT_POSITION, { skipValidation = false } = {}) {
+  constructor(fen = DEFAULT_POSITION, { skipValidation = false, isChess960 = false } = {}) {
     this._comments = {}
     this._suffixes = {}
     this._nags = {}
-    this.load(fen, { skipValidation })
+    this._isChess960 = isChess960
+    this.load(fen, { skipValidation, isChess960 })
   }
 
   clear({ preserveHeaders = false } = {}) {
@@ -792,7 +798,7 @@ export class Chess {
     this._header['FEN'] = null
   }
 
-  load(fen: string, { skipValidation = false, preserveHeaders = false } = {}) {
+  load(fen: string, { skipValidation = false, preserveHeaders = false, isChess960 = false } = {}) {
     let tokens = fen.split(/\s+/)
 
     // append commonly omitted fen tokens
@@ -814,6 +820,7 @@ export class Chess {
     let square = 0
 
     this.clear({ preserveHeaders })
+    this._isChess960 = isChess960
 
     for (let i = 0; i < position.length; i++) {
       const piece = position.charAt(i)
@@ -830,6 +837,10 @@ export class Chess {
         )
         square++
       }
+    }
+
+    if (this._isChess960) {
+      this._setRookPositions()
     }
 
     this._turn = tokens[1] as Color
@@ -1569,21 +1580,25 @@ export class Chess {
       if (type === PAWN) {
         if (forPiece && forPiece !== type) continue
 
+        const forward = this._kings[us] < 64 ? 16 : -16
+
         // single square, non-capturing
-        to = from + PAWN_OFFSETS[us][0]
+        to = from + forward
         if (!this._board[to]) {
           addMove(moves, us, from, to, PAWN)
 
           // double square
-          to = from + PAWN_OFFSETS[us][1]
-          if (SECOND_RANK[us] === rank(from) && !this._board[to]) {
-            addMove(moves, us, from, to, PAWN, undefined, BITS.BIG_PAWN)
+          const doubleTo = from + 2 * forward
+          const startingRank = us === WHITE ? (this._kings[WHITE] < 64 ? 1 : 6) : (this._kings[BLACK] < 64 ? 1 : 6)
+          if (rank(from) === startingRank && !this._board[doubleTo]) {
+            addMove(moves, us, from, doubleTo, PAWN, undefined, BITS.BIG_PAWN)
           }
         }
 
         // pawn captures
-        for (let j = 2; j < 4; j++) {
-          to = from + PAWN_OFFSETS[us][j]
+        const captureOffsets = forward > 0 ? [forward + 1, forward - 1] : [forward - 1, forward + 1]
+        for (const offset of captureOffsets) {
+          to = from + offset
           if (to & 0x88) continue
 
           if (this._board[to]?.color === them) {
@@ -1644,22 +1659,38 @@ export class Chess {
 
     if (forPiece === undefined || forPiece === KING) {
       if (!singleSquare || lastSquare === this._kings[us]) {
-        // king-side castling
-        if (this._castling[us] & BITS.KSIDE_CASTLE) {
-          const castlingFrom = this._kings[us]
-          const castlingTo = castlingFrom + 2
+        if (this._isChess960) {
+          // Chess960 castling
+          // king-side castling
+          if (this._castling[us] & BITS.KSIDE_CASTLE) {
+          const kingSquare = this._kings[us]
+          const rookSquare = this._rooks[us].kingside
+          const castlingTo = rookSquare
+          const rookTo = kingSquare < rookSquare ? kingSquare + 1 : kingSquare - 1
 
-          if (
-            !this._board[castlingFrom + 1] &&
-            !this._board[castlingTo] &&
-            !this._attacked(them, this._kings[us]) &&
-            !this._attacked(them, castlingFrom + 1) &&
-            !this._attacked(them, castlingTo)
-          ) {
+          // Check if path is clear
+          let pathClear = true
+          const start = Math.min(kingSquare, rookSquare) + 1
+          const end = Math.max(kingSquare, rookSquare)
+          for (let sq = start; sq < end; sq++) {
+            if (this._board[sq]) {
+              pathClear = false
+              break
+            }
+          }
+
+          // Check king not in check and squares not attacked
+          const attackedSquares = [kingSquare]
+          if (rookTo !== kingSquare) attackedSquares.push(rookTo)
+
+          const kingSafe = !this._attacked(them, kingSquare) &&
+            attackedSquares.every(sq => !this._attacked(them, sq))
+
+          if (pathClear && kingSafe) {
             addMove(
               moves,
               us,
-              this._kings[us],
+              kingSquare,
               castlingTo,
               KING,
               undefined,
@@ -1670,26 +1701,90 @@ export class Chess {
 
         // queen-side castling
         if (this._castling[us] & BITS.QSIDE_CASTLE) {
-          const castlingFrom = this._kings[us]
-          const castlingTo = castlingFrom - 2
+          const kingSquare = this._kings[us]
+          const rookSquare = this._rooks[us].queenside
+          const castlingTo = rookSquare
+          const rookTo = kingSquare < rookSquare ? kingSquare + 1 : kingSquare - 1
 
-          if (
-            !this._board[castlingFrom - 1] &&
-            !this._board[castlingFrom - 2] &&
-            !this._board[castlingFrom - 3] &&
-            !this._attacked(them, this._kings[us]) &&
-            !this._attacked(them, castlingFrom - 1) &&
-            !this._attacked(them, castlingTo)
-          ) {
+          // Check if path is clear
+          let pathClear = true
+          const start = Math.min(kingSquare, rookSquare) + 1
+          const end = Math.max(kingSquare, rookSquare)
+          for (let sq = start; sq < end; sq++) {
+            if (this._board[sq]) {
+              pathClear = false
+              break
+            }
+          }
+
+          // Check king not in check and squares not attacked
+          const attackedSquares = [kingSquare]
+          if (rookTo !== kingSquare) attackedSquares.push(rookTo)
+
+          const kingSafe = !this._attacked(them, kingSquare) &&
+            attackedSquares.every(sq => !this._attacked(them, sq))
+
+          if (pathClear && kingSafe) {
             addMove(
               moves,
               us,
-              this._kings[us],
+              kingSquare,
               castlingTo,
               KING,
               undefined,
               BITS.QSIDE_CASTLE,
             )
+          }
+        }
+        } else {
+          // Standard chess castling
+          // king-side castling
+          if (this._castling[us] & BITS.KSIDE_CASTLE) {
+            const castlingFrom = this._kings[us]
+            const castlingTo = castlingFrom + 2
+
+            if (
+              !this._board[castlingFrom + 1] &&
+              !this._board[castlingTo] &&
+              !this._attacked(them, this._kings[us]) &&
+              !this._attacked(them, castlingFrom + 1) &&
+              !this._attacked(them, castlingTo)
+            ) {
+              addMove(
+                moves,
+                us,
+                this._kings[us],
+                castlingTo,
+                KING,
+                undefined,
+                BITS.KSIDE_CASTLE,
+              )
+            }
+          }
+
+          // queen-side castling
+          if (this._castling[us] & BITS.QSIDE_CASTLE) {
+            const castlingFrom = this._kings[us]
+            const castlingTo = castlingFrom - 2
+
+            if (
+              !this._board[castlingFrom - 1] &&
+              !this._board[castlingFrom - 2] &&
+              !this._board[castlingFrom - 3] &&
+              !this._attacked(them, this._kings[us]) &&
+              !this._attacked(them, castlingFrom - 1) &&
+              !this._attacked(them, castlingTo)
+            ) {
+              addMove(
+                moves,
+                us,
+                this._kings[us],
+                castlingTo,
+                KING,
+                undefined,
+                BITS.QSIDE_CASTLE,
+              )
+            }
           }
         }
       }
@@ -1828,6 +1923,31 @@ export class Chess {
       this._hash ^= this._pieceKey(move.to)
     }
 
+    // Move rook first for castling
+    if (this._board[move.from].type === KING && (move.flags & (BITS.KSIDE_CASTLE | BITS.QSIDE_CASTLE))) {
+      if (move.flags & BITS.KSIDE_CASTLE) {
+        if (this._isChess960) {
+          const rookFrom = this._rooks[us].kingside
+          const rookTo = move.to < rookFrom ? move.to + 1 : move.to - 1
+          this._movePiece(rookFrom, rookTo)
+        } else {
+          const castlingTo = move.to - 1
+          const castlingFrom = move.to + 1
+          this._movePiece(castlingFrom, castlingTo)
+        }
+      } else if (move.flags & BITS.QSIDE_CASTLE) {
+        if (this._isChess960) {
+          const rookFrom = this._rooks[us].queenside
+          const rookTo = move.to < rookFrom ? move.to + 1 : move.to - 1
+          this._movePiece(rookFrom, rookTo)
+        } else {
+          const castlingTo = move.to + 1
+          const castlingFrom = move.to - 2
+          this._movePiece(castlingFrom, castlingTo)
+        }
+      }
+    }
+
     this._movePiece(move.from, move.to)
 
     // if ep capture, remove the captured pawn
@@ -1849,43 +1969,48 @@ export class Chess {
     if (this._board[move.to].type === KING) {
       this._kings[us] = move.to
 
-      // if we castled, move the rook next to the king
-      if (move.flags & BITS.KSIDE_CASTLE) {
-        const castlingTo = move.to - 1
-        const castlingFrom = move.to + 1
-        this._movePiece(castlingFrom, castlingTo)
-      } else if (move.flags & BITS.QSIDE_CASTLE) {
-        const castlingTo = move.to + 1
-        const castlingFrom = move.to - 2
-        this._movePiece(castlingFrom, castlingTo)
-      }
-
       // turn off castling
       this._castling[us] = 0
     }
 
     // turn off castling if we move a rook
     if (this._castling[us]) {
-      for (let i = 0, len = ROOKS[us].length; i < len; i++) {
-        if (
-          move.from === ROOKS[us][i].square &&
-          this._castling[us] & ROOKS[us][i].flag
-        ) {
-          this._castling[us] ^= ROOKS[us][i].flag
-          break
+      if (this._isChess960) {
+        if (move.from === this._rooks[us].kingside) {
+          this._castling[us] &= ~BITS.KSIDE_CASTLE
+        } else if (move.from === this._rooks[us].queenside) {
+          this._castling[us] &= ~BITS.QSIDE_CASTLE
+        }
+      } else {
+        for (let i = 0, len = ROOKS[us].length; i < len; i++) {
+          if (
+            move.from === ROOKS[us][i].square &&
+            this._castling[us] & ROOKS[us][i].flag
+          ) {
+            this._castling[us] ^= ROOKS[us][i].flag
+            break
+          }
         }
       }
     }
 
     // turn off castling if we capture a rook
     if (this._castling[them]) {
-      for (let i = 0, len = ROOKS[them].length; i < len; i++) {
-        if (
-          move.to === ROOKS[them][i].square &&
-          this._castling[them] & ROOKS[them][i].flag
-        ) {
-          this._castling[them] ^= ROOKS[them][i].flag
-          break
+      if (this._isChess960) {
+        if (move.to === this._rooks[them].kingside) {
+          this._castling[them] &= ~BITS.KSIDE_CASTLE
+        } else if (move.to === this._rooks[them].queenside) {
+          this._castling[them] &= ~BITS.QSIDE_CASTLE
+        }
+      } else {
+        for (let i = 0, len = ROOKS[them].length; i < len; i++) {
+          if (
+            move.to === ROOKS[them][i].square &&
+            this._castling[them] & ROOKS[them][i].flag
+          ) {
+            this._castling[them] ^= ROOKS[them][i].flag
+            break
+          }
         }
       }
     }
@@ -2005,15 +2130,27 @@ export class Chess {
     }
 
     if (move.flags & (BITS.KSIDE_CASTLE | BITS.QSIDE_CASTLE)) {
-      let castlingTo: number, castlingFrom: number
-      if (move.flags & BITS.KSIDE_CASTLE) {
-        castlingTo = move.to + 1
-        castlingFrom = move.to - 1
+      if (this._isChess960) {
+        if (move.flags & BITS.KSIDE_CASTLE) {
+          const rookFrom = this._rooks[us].kingside
+          const rookTo = this._kings[us] < rookFrom ? this._kings[us] + 1 : this._kings[us] - 1
+          this._movePiece(rookTo, rookFrom)
+        } else {
+          const rookFrom = this._rooks[us].queenside
+          const rookTo = this._kings[us] < rookFrom ? this._kings[us] + 1 : this._kings[us] - 1
+          this._movePiece(rookTo, rookFrom)
+        }
       } else {
-        castlingTo = move.to - 2
-        castlingFrom = move.to + 1
+        let castlingTo: number, castlingFrom: number
+        if (move.flags & BITS.KSIDE_CASTLE) {
+          castlingTo = move.to + 1
+          castlingFrom = move.to - 1
+        } else {
+          castlingTo = move.to - 2
+          castlingFrom = move.to + 1
+        }
+        this._movePiece(castlingFrom, castlingTo)
       }
-      this._movePiece(castlingFrom, castlingTo)
     }
 
     return move
@@ -2907,5 +3044,77 @@ export class Chess {
 
   moveNumber(): number {
     return this._moveNumber
+  }
+
+  private _setRookPositions(): void {
+    for (const color of [WHITE, BLACK] as const) {
+      const rank = color === WHITE ? 7 : 0 // Rank 1 for white (0-7), rank 8 for black
+      let kingSquare = -1
+      const rookSquares: number[] = []
+
+      for (let file = 0; file < 8; file++) {
+        const square = rank * 8 + file
+        const piece = this._board[square]
+        if (piece && piece.type === KING && piece.color === color) {
+          kingSquare = square
+        } else if (piece && piece.type === ROOK && piece.color === color) {
+          rookSquares.push(square)
+        }
+      }
+
+      if (kingSquare !== -1 && rookSquares.length === 2) {
+        const [leftRook, rightRook] = rookSquares.sort((a, b) => a - b)
+        this._rooks[color] = {
+          queenside: leftRook,
+          kingside: rightRook,
+        }
+      }
+    }
+  }
+
+  /**
+   * Generate a random Chess960 starting position FEN.
+   * @returns A valid Chess960 FEN string.
+   */
+  static generateChess960(): string {
+    let backRank: string[] = new Array(8).fill('')
+
+    // 1. Place bishops on opposite colors
+    const lightSquares = [0, 2, 4, 6]
+    const darkSquares = [1, 3, 5, 7]
+    const bishop1 = lightSquares[Math.floor(Math.random() * lightSquares.length)]
+    const bishop2 = darkSquares[Math.floor(Math.random() * darkSquares.length)]
+    backRank[bishop1] = 'b'
+    backRank[bishop2] = 'b'
+
+    // 2. Place queen on remaining squares
+    const remaining = [0,1,2,3,4,5,6,7].filter(i => backRank[i] === '')
+    const queenPos = remaining[Math.floor(Math.random() * remaining.length)]
+    backRank[queenPos] = 'q'
+    remaining.splice(remaining.indexOf(queenPos), 1)
+
+    // 3. Place knights on remaining
+    const knight1 = remaining.splice(Math.floor(Math.random() * remaining.length), 1)[0]
+    backRank[knight1] = 'n'
+    const knight2 = remaining.splice(Math.floor(Math.random() * remaining.length), 1)[0]
+    backRank[knight2] = 'n'
+
+    // 4. Place rooks and king on remaining 3, with king between rooks
+    // Shuffle remaining
+    for (let i = remaining.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1))
+      ;[remaining[i], remaining[j]] = [remaining[j], remaining[i]]
+    }
+    // Ensure king is in middle: sort and put king second
+    remaining.sort((a, b) => a - b)
+    backRank[remaining[0]] = 'r'
+    backRank[remaining[1]] = 'k'
+    backRank[remaining[2]] = 'r'
+
+    // Build FEN
+    const whiteBackRank = backRank.join('').toUpperCase()
+    const blackBackRank = backRank.join('')
+    const fen = `${blackBackRank}/pppppppp/8/8/8/8/PPPPPPPP/${whiteBackRank} w KQkq - 0 1`
+    return fen
   }
 }
